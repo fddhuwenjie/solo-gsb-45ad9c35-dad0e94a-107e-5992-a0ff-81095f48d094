@@ -40,6 +40,13 @@
 不保存半成品。页面以灰色泳道展示冻结历史、彩色泳道展示补做时间轴并标出
 衔接处，可回看已保存补做方案并导出 JSON。
 
+⑦ **复核批次封存**：在⑤勾选 2～8 条已保存复核，系统在一次事务中确认它们引用
+**同一份原排程快照**（规范化 JSON 的 SHA-256 指纹）、允许偏差/剂量上限/最大
+采样间隔一致且**样本集合相同**，再按样本 ID 对齐结论（任一记录「数据不足」→
+数据不足；否则任一「复核」→ 复核；全部「通过」→ 通过），保留每条输入记录及
+每个样本跨记录的最大剂量、最大偏差。快照缺失、重复选择或基线/参数不一致时
+整批拒绝且不落库。成功后生成**不可变批次**，可回看、导出；删除原复核不影响批次。
+
 ---
 
 ## 一条命令启动
@@ -63,9 +70,10 @@ docker compose up --build
 | --- | --- |
 | 前端 | 原生 HTML / CSS / JavaScript（无框架、无构建步骤），SVG 画湿度曲线、Pointer Events 拖拽 |
 | 后端 | Flask（REST API）+ waitress 生产级 WSGI |
-| 存储 | SQLite（样本、阶梯、互斥关系、占用、容量/独立换档上限设置、排程快照、复核记录、补做方案） |
+| 存储 | SQLite（样本、阶梯、互斥关系、占用、容量/独立换档上限设置、排程快照、复核记录、补做方案、复核批次） |
 | 编排引擎 | `app/scheduler.py`，纯标准库分钟级确定性仿真 + 排列/启发式搜索（含冻结历史前缀的补做排程），可独立单测 |
 | 复核引擎 | `app/review.py`，纯标准库分段线性曲线解析积分（允许带面积 / 采样缺口），可独立单测 |
+| 批次封存引擎 | `app/batch.py`，纯标准库快照指纹/参数/样本集合一致性确认 + 按样本对齐结论与极值，可独立单测 |
 
 ### 本地不使用 Docker 运行
 
@@ -132,6 +140,9 @@ python3 -m unittest discover -s app/tests -v
 | POST | `/api/reviews/{id}/redo` | 对该复核生成**补做排程**，见下 |
 | GET | `/api/redo` | 已保存补做方案列表（可带 `?review_id=` 过滤） |
 | GET/DELETE | `/api/redo/{id}` | 查看 / 删除单条补做方案 |
+| POST | `/api/review-batches` | **复核批次封存**：body `{review_ids:[2..8], note?}`，同快照/同参数/同样本才落库 |
+| GET | `/api/review-batches` | 已封存复核批次列表 |
+| GET/DELETE | `/api/review-batches/{id}` | 查看完整不可变批次（含冻结明细）/ 删除批次 |
 | GET | `/` | 编排台页面 |
 
 ### 样本 JSON 示例
@@ -284,20 +295,87 @@ http://localhost:8000 均保持不变。
 
 ---
 
+## 复核批次封存（⑦）
+
+操作员在⑤的「已保存复核记录」中勾选 **2～8 条**复核记录（可附批次备注），
+点击「封存为复核批次」。系统在**一次事务**内完成以下确认，任一不满足即
+**整批拒绝、不落库**：
+
+1. 每条记录都嵌入了**同一份原排程快照**——按快照规范化 JSON 的
+   SHA-256 指纹比对（不是排程 id，快照本身不带 id；自动排程与拖拽后的
+   手工排程时间轴不同，指纹自然不同）；
+2. **允许偏差、累计偏差剂量上限、最大采样间隔**三项基线参数逐条一致；
+3. 各记录复核的**样本集合相同**（按样本 ID 多重集合，与记录内顺序无关）。
+
+确认通过后按**样本 ID 对齐**各条记录的结论：
+
+- 任一条记录对该样本为「数据不足」→ 批次样本结论「数据不足」；
+- 否则任一条为「复核」→「复核」；
+- 全部「通过」→「通过」。
+
+批次总体结论取全部样本结论中最严重者。每个样本保留其跨记录的
+**最大剂量**与**最大偏差**（并标注来自哪条记录）；每条输入记录的
+读数、采样缺口、逐样本明细以及共享的原排程快照都**完整冻结**进批次。
+
+### 拒绝原因（HTTP 400，`reason_code`）
+
+| code | 含义 |
+| --- | --- |
+| `BATCH_SIZE` | 选择数量不在 2～8 条 |
+| `DUPLICATE_SELECTION` | 选择列表中同一记录被勾选多次 |
+| `REVIEW_NOT_FOUND` | 所选 ID 不存在或已被删除 |
+| `MISSING_SNAPSHOT` | 某条记录未嵌入原排程快照（旧版记录） |
+| `SNAPSHOT_MISMATCH` | 记录间原排程快照指纹不同 |
+| `PARAMETER_MISMATCH` | 允许偏差 / 剂量上限 / 最大采样间隔不一致（`details.fields` 指明字段） |
+| `SAMPLE_SET_MISMATCH` | 样本集合不同（`details.missing/extra`） |
+| `BAD_REVIEW_PAYLOAD` | 记录内容不完整（缺参数/样本结果） |
+
+### 不可变、回看与导出
+
+封存成功生成**不可变批次**：⑦区列出全部批次，可回看批次头（总体结论、
+基线参数、快照指纹前缀）、按条切换的计划/实测/允许带/缺口曲线，以及
+**样本 × 各条记录**的对齐矩阵（每格结论/剂量/偏差 + 批次结论 +
+最大剂量/最大偏差及来源记录），并可导出完整 JSON。
+
+批次与原复核记录**没有外键关联**：删除任何原复核都不影响已封存批次
+（删除复核时其补做方案仍照常级联删除）；批次内保留冻结副本，
+原记录删除后仍可回看、导出。删除批次也不影响任何原复核。
+原排程、单条复核、补做与 Docker Compose 启动方式保持可用。
+
+### 批次 JSON 包含
+
+`schema:"review-batch/v1"`、`parameters`、`schedule_fingerprint`、
+`source_schedule`（共享原排程快照，只保留一份）、`review_ids`、
+`reviews[]`（每条：`review_id/created_at/note/summary/
+overall_conclusion/readings/gaps/samples_by_id`）、`samples[]`
+（`per_review[]` 逐条结论/剂量/偏差、`max_dose/max_dose_review_id`、
+`max_deviation/max_deviation_review_id`、对齐后 `conclusion`）、
+`summary` 与 `overall_conclusion`。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/review-batches` | body `{review_ids:[2..8 个 ID], note?}`；一次事务内确认后封存 |
+| GET | `/api/review-batches` | 已封存批次列表（摘要，不含冻结明细） |
+| GET/DELETE | `/api/review-batches/{id}` | 查看完整不可变批次（含冻结记录与原排程快照）/ 删除批次 |
+
+---
+
 ## 目录
 
 ```
 app/
   scheduler.py     # 编排引擎（无框架依赖，可独立单测）
   review.py        # 实测湿度复核引擎（分段线性曲线解析积分，可独立单测）
-  db.py            # SQLite 持久化（含复核记录）
+  batch.py         # 复核批次封存引擎（一致性确认 + 样本对齐，可独立单测）
+  db.py            # SQLite 持久化（含复核记录、补做方案、不可变批次）
   server.py        # Flask 路由 + waitress
   static/
     index.html     # 单页界面
     style.css
-    app.js         # 时间轴/SVG/拖拽/复核/导出
+    app.js         # 时间轴/SVG/拖拽/复核/批次封存/补做/导出
   tests/test_scheduler.py
   tests/test_review.py
+  tests/test_batch.py
 Dockerfile
 docker-compose.yml
 requirements.txt

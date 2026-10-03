@@ -11,6 +11,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from . import scheduler
 from . import review as review_mod
+from .batch import BatchError, MIN_BATCH, MAX_BATCH
 from .db import DB
 from .seed import seed_if_empty
 
@@ -396,6 +397,60 @@ def get_redo(redo_id):
 @app.delete('/api/redo/<int:redo_id>')
 def remove_redo(redo_id):
     db.delete_redo(redo_id)
+    return jsonify({'ok': True})
+
+
+# --------------------------------------------------------------------------- #
+# 复核批次封存（2～8 条已保存复核，一致性确认后落库为不可变批次）
+# --------------------------------------------------------------------------- #
+@app.post('/api/review-batches')
+def seal_review_batch():
+    """把 2～8 条已保存复核记录封存为不可变批次。
+
+    body: {review_ids: [..], note?}
+    一次事务内确认：原排程快照指纹一致、允许偏差/剂量上限/最大采样间隔
+    一致、样本集合相同；按样本 ID 对齐结论并保留每条记录与每个样本的
+    最大剂量、最大偏差。缺失快照、重复选择或基线不一致时整批拒绝、不落库。
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    raw_ids = body.get('review_ids')
+    if not isinstance(raw_ids, list):
+        return jsonify({'error': f'请求体需要 review_ids 数组（{MIN_BATCH}～'
+                                 f'{MAX_BATCH} 条已保存复核记录）'}), 400
+    try:
+        review_ids = [int(x) for x in raw_ids]
+    except (TypeError, ValueError):
+        return jsonify({'error': 'review_ids 必须是整数 ID 数组'}), 400
+    note = str(body.get('note') or '')
+    try:
+        bid, created_at, payload = db.seal_review_batch(review_ids, note)
+    except BatchError as e:
+        return jsonify({'error': e.message, 'reason_code': e.code,
+                        'details': e.details}), 400
+    return jsonify({'ok': True, 'batch_id': bid,
+                    'created_at': created_at, **payload}), 201
+
+
+@app.get('/api/review-batches')
+def list_review_batches():
+    try:
+        limit = max(1, min(200, int(request.args.get('limit', 50))))
+    except ValueError:
+        limit = 50
+    return jsonify(db.list_review_batches(limit))
+
+
+@app.get('/api/review-batches/<int:batch_id>')
+def get_review_batch(batch_id):
+    rec = db.get_review_batch(batch_id)
+    if rec is None:
+        return jsonify({'error': '复核批次不存在'}), 404
+    return jsonify(rec)
+
+
+@app.delete('/api/review-batches/<int:batch_id>')
+def remove_review_batch(batch_id):
+    db.delete_review_batch(batch_id)
     return jsonify({'ok': True})
 
 

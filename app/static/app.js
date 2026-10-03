@@ -895,32 +895,36 @@ function reviewMinutes(out) {
   return Math.max(30, max + 10);
 }
 
-function renderReview(out) {
+function renderReview(out, target = null) {
+  // target 为 null 时渲染⑤主复核视图；批次回看时传入独立的轨道目标
+  const tg = target || { ruler: '#rvRuler', chart: '#rvChart',
+                         lanes: '#rvLanes', px: 2 };
   const total = reviewMinutes(out);
-  state.reviewPx = total > 1000 ? 0.8 : total > 500 ? 1.2 : 2;
-  const W = Math.max(640, total * state.reviewPx + 120);
-  renderRvRuler(W, total);
-  renderRvChart(W, total, out);
-  renderRvLanes(W, out);
-  renderRvSamples(out);
+  tg.px = total > 1000 ? 0.8 : total > 500 ? 1.2 : 2;
+  if (!target) state.reviewPx = tg.px;
+  const W = Math.max(640, total * tg.px + 120);
+  renderRvRuler(W, total, tg);
+  renderRvChart(W, total, out, tg);
+  renderRvLanes(W, out, tg);
+  if (!target) renderRvSamples(out);
 }
 
-function renderRvRuler(W, total) {
-  const ruler = $('#rvRuler');
+function renderRvRuler(W, total, tg) {
+  const ruler = $(tg.ruler);
   ruler.style.width = W + 'px';
   ruler.innerHTML = '<span class="track-label" style="background:transparent">时间 →</span>';
   const step = total > 1000 ? 120 : total > 500 ? 60 : 30;
   for (let m = 0; m <= total; m += step) {
     const t = document.createElement('div');
     t.className = 'tick';
-    t.style.left = (74 + m * state.reviewPx) + 'px';
+    t.style.left = (74 + m * tg.px) + 'px';
     t.textContent = fmtMin(m);
     ruler.appendChild(t);
   }
 }
 
-function renderRvChart(W, total, out) {
-  const chart = $('#rvChart');
+function renderRvChart(W, total, out, tg) {
+  const chart = $(tg.chart);
   chart.style.width = W + 'px';
   chart.innerHTML = '<span class="track-label">湿度%</span>';
   const svgNS = 'http://www.w3.org/2000/svg';
@@ -929,7 +933,7 @@ function renderRvChart(W, total, out) {
   svg.setAttribute('width', W - 74); svg.setAttribute('height', 150);
   svg.style.left = '74px';
   const TOP = 18, BOT = 12;
-  const xOf = m => m * state.reviewPx;
+  const xOf = m => m * tg.px;
   const yOf = rh => TOP + (1 - rh / 100) * (150 - TOP - BOT);
 
   // 参考线
@@ -973,8 +977,8 @@ function renderRvChart(W, total, out) {
       const segs2 = [];
       let cur = [0];
       for (let i = 1; i < up.length; i++) {
-        const minute = Math.round(up[i][0] / state.reviewPx);
-        const prevMinute = Math.round(up[i - 1][0] / state.reviewPx);
+        const minute = Math.round(up[i][0] / tg.px);
+        const prevMinute = Math.round(up[i - 1][0] / tg.px);
         const cont = minute === prevMinute + 1 && !gapMins.has(prevMinute);
         if (cont) cur.push(i);
         else { segs2.push(cur); cur = [i]; }
@@ -1014,7 +1018,7 @@ function renderRvChart(W, total, out) {
   for (const g of out.gaps || []) {
     const rect = document.createElementNS(svgNS, 'rect');
     rect.setAttribute('x', xOf(g.start));
-    rect.setAttribute('width', (g.end - g.start) * state.reviewPx);
+    rect.setAttribute('width', (g.end - g.start) * tg.px);
     rect.setAttribute('y', 0); rect.setAttribute('height', 150);
     rect.setAttribute('fill', 'rgba(192,57,43,.07)');
     svg.appendChild(rect);
@@ -1103,8 +1107,8 @@ function renderRvChart(W, total, out) {
   chart.appendChild(svg);
 }
 
-function renderRvLanes(W, out) {
-  const box = $('#rvLanes');
+function renderRvLanes(W, out, tg) {
+  const box = $(tg.lanes);
   box.innerHTML = '';
   for (const s of out.samples) {
     const row = document.createElement('div');
@@ -1117,8 +1121,8 @@ function renderRvLanes(W, out) {
     const end = s.unboard ?? s.board;
     const win = document.createElement('div');
     win.className = 'rv-window';
-    win.style.left = (74 + s.board * state.reviewPx) + 'px';
-    win.style.width = Math.max(8, (end - s.board) * state.reviewPx) + 'px';
+    win.style.left = (74 + s.board * tg.px) + 'px';
+    win.style.width = Math.max(8, (end - s.board) * tg.px) + 'px';
     win.style.background = { pass: '#5e8b6e', review: '#c0392b',
       insufficient: '#b08d3f' }[s.conclusion];
     win.textContent = `${rvConclusionName[s.conclusion]} · ${fmtMin(s.board)}–${
@@ -1127,8 +1131,8 @@ function renderRvLanes(W, out) {
     for (const u of s.uncovered || []) {
       const g = document.createElement('div');
       g.className = 'rv-gapband';
-      g.style.left = (74 + u.start * state.reviewPx) + 'px';
-      g.style.width = Math.max(3, (u.end - u.start) * state.reviewPx) + 'px';
+      g.style.left = (74 + u.start * tg.px) + 'px';
+      g.style.width = Math.max(3, (u.end - u.start) * tg.px) + 'px';
       g.title = u.reason_label;
       row.appendChild(g);
     }
@@ -1182,6 +1186,15 @@ function renderRvSamples(out) {
 }
 
 // ---- 记录 ------------------------------------------------------------------ //
+// 待封存批次的勾选：仅在当前已加载列表内保留，刷新后自动剔除已消失的记录
+const batchSel = new Set();
+
+function updateBatchBar() {
+  const n = batchSel.size;
+  $('#btSelInfo').textContent = `已选 ${n} 条（需 2～8 条）`;
+  $('#btSeal').disabled = !(n >= 2 && n <= 8);
+}
+
 async function loadReviewRecords() {
   const box = $('#rvRecordList');
   box.innerHTML = '';
@@ -1189,25 +1202,48 @@ async function loadReviewRecords() {
   try {
     list = await api('/api/reviews');
   } catch { list = []; }
+  // 列表变化后剔除已不存在的选择（如记录被删除）
+  const liveIds = new Set(list.map(r => r.id));
+  for (const id of [...batchSel]) if (!liveIds.has(id)) batchSel.delete(id);
+  updateBatchBar();
   if (!list.length) {
     box.innerHTML = '<div style="color:#998f7d;font-size:12px;margin-top:6px">尚无已保存复核记录。</div>';
     return;
   }
   for (const r of list) {
     const div = document.createElement('div');
-    div.className = 'rv-record';
+    div.className = 'rv-record' + (batchSel.has(r.id) ? ' selected' : '');
     const s = r.summary || {};
     const name = rvConclusionName[r.conclusion] || r.conclusion;
-    div.innerHTML = `<span><span class="dot ${r.conclusion}"></span>#${r.id} · ${
+    const noSnapshot = r.has_source_schedule === false;
+    div.innerHTML = `<span><input type="checkbox" class="pick" ${
+        batchSel.has(r.id) ? 'checked' : ''}${noSnapshot ? ' disabled' : ''}
+        title="${noSnapshot ? '旧记录缺少原排程快照，不能参与封存' : '勾选以封存批次'}">
+      <span class="dot ${r.conclusion}"></span>#${r.id} · ${
       esc(r.created_at)} · <b>${name}</b> · 通过 ${s.pass ?? 0}/复核 ${
       s.review ?? 0}/数据不足 ${s.insufficient ?? 0}${
-      r.note ? ' · ' + esc(r.note) : ''}</span>
+      r.note ? ' · ' + esc(r.note) : ''}${
+      noSnapshot ? ' <span class="batch-seal-tag">（无原排程快照，不可封存）</span>' : ''}</span>
       <span class="ops">
         <button class="mini" data-act="view">查看</button>
         <button class="mini" data-act="redo" title="只重排结论为「复核」/「数据不足」的样本，原排程冻结为历史">⑥ 补做排程</button>
         <button class="mini" data-act="json">JSON</button>
         <button class="mini del" data-act="del">删除</button>
       </span>`;
+    div.querySelector('.pick').onchange = (e) => {
+      if (e.target.checked) {
+        if (batchSel.size >= 8) {
+          e.target.checked = false;
+          setRvStatus('一个封存批次最多选择 8 条复核记录。', 'warn');
+          return;
+        }
+        batchSel.add(r.id);
+      } else {
+        batchSel.delete(r.id);
+      }
+      div.classList.toggle('selected', e.target.checked);
+      updateBatchBar();
+    };
     div.querySelector('[data-act="view"]').onclick = async () => {
       const rec = await api(`/api/reviews/${r.id}`);
       state.review = rec.payload;
@@ -1219,7 +1255,7 @@ async function loadReviewRecords() {
       downloadReviewJSON(r.payload, `humidity-review-${r.id}.json`);
     };
     div.querySelector('[data-act="del"]').onclick = async () => {
-      if (!confirm(`确定删除复核记录 #${r.id}？`)) return;
+      if (!confirm(`确定删除复核记录 #${r.id}？（已封存的复核批次不受影响）`)) return;
       await api(`/api/reviews/${r.id}`, { method: 'DELETE' });
       loadReviewRecords();
     };
@@ -1253,6 +1289,295 @@ $('#rvSave').onclick = () => runReview({ save: true });
 $('#rvFill').onclick = fillPlanReadings;
 $('#rvExport').onclick = exportReviewJSON;
 $('#rvReload').onclick = loadReviewRecords;
+
+// --------------------------------------------------------------------------- //
+// ⑦ 复核批次封存
+// --------------------------------------------------------------------------- //
+const batchState = {
+  list: [],        // 已封存批次列表
+  current: null,   // 当前回看的完整批次 payload
+  currentId: null,
+  activeReviewId: null,
+  px: 2,
+};
+
+function setBatchStatus(msg, kind = '') {
+  const el = $('#batchStatus');
+  el.textContent = msg;
+  el.className = 'status ' + kind;
+}
+
+$('#btClearSel').onclick = () => {
+  batchSel.clear();
+  $$('#rvRecordList .pick').forEach(cb => { cb.checked = false; });
+  $$('#rvRecordList .rv-record').forEach(d => d.classList.remove('selected'));
+  updateBatchBar();
+};
+
+$('#btSeal').onclick = async () => {
+  const ids = [...batchSel];
+  if (ids.length < 2 || ids.length > 8) return;
+  const note = $('#btNote').value.trim();
+  setRvStatus('正在一次性确认原排程快照、基线参数与样本集合…', 'warn');
+  try {
+    const out = await api('/api/review-batches', {
+      method: 'POST',
+      body: { review_ids: ids, note },
+    });
+    batchSel.clear();
+    $('#btNote').value = '';
+    updateBatchBar();
+    await loadReviewRecords();
+    setRvStatus(`✓ 批次 #${out.batch_id} 已封存：${out.review_count} 条复核，` +
+      `总体结论「${out.overall_conclusion_label}」（通过 ${out.summary.pass}/` +
+      `复核 ${out.summary.review}/数据不足 ${out.summary.insufficient}）。`, 'ok');
+    await loadBatchRecords();
+    viewBatch(out.batch_id, out);
+  } catch (e) {
+    setRvStatus('批次封存被拒绝（整批未落库）：' + e.message, 'bad');
+  } finally {
+    updateBatchBar();
+  }
+};
+
+// 把批次内某条冻结复核还原成 renderReview 需要的复核结果形态
+function batchReviewView(payload, reviewId) {
+  const fr = payload.reviews.find(r => r.review_id === reviewId) ||
+             payload.reviews[0];
+  const planSeries = planSeriesFromSegments(
+    payload.source_schedule.segments).map((v, t) => [t, v]);
+  const samples = payload.source_schedule.lanes.map(lane => {
+    const s = fr.samples_by_id[lane.sample_id];
+    return s ? { ...s, code: lane.code,
+                 conclusion_label: s.conclusion_label
+                   || rvConclusionName[s.conclusion] }
+      : { sample_id: lane.sample_id, code: lane.code,
+          board: lane.board, unboard: lane.unboard, conclusion: 'pass',
+          conclusion_label: rvConclusionName.pass,
+          data_complete: true, dose: 0, max_deviation: 0,
+          uncovered: [], excess_intervals: [] };
+  });
+  return {
+    parameters: { ...payload.parameters,
+                  start_minute: fr.readings?.[0]?.[0] ?? 0 },
+    schedule: payload.schedule,
+    plan_series: planSeries,
+    readings: fr.readings || [],
+    gaps: fr.gaps || [],
+    samples,
+    summary: fr.summary,
+    overall_conclusion: fr.overall_conclusion,
+  };
+}
+
+function viewBatch(batchId, payloadArg = null) {
+  const render = (payload) => {
+    batchState.current = payload;
+    batchState.currentId = batchId;
+    // 默认展示第一条冻结复核
+    batchState.activeReviewId =
+      batchState.activeReviewId &&
+      payload.reviews.some(r => r.review_id === batchState.activeReviewId)
+        ? batchState.activeReviewId
+        : payload.review_ids[0];
+    renderBatchView(payload);
+  };
+  if (payloadArg) {
+    render(payloadArg);
+    setBatchStatus(`✓ 批次 #${batchId} 已封存并载入，可切换各条记录的曲线、导出 JSON。`, 'ok');
+    return;
+  }
+  api(`/api/review-batches/${batchId}`).then(rec => {
+    render(rec.payload);
+    setBatchStatus(`已载入封存批次 #${batchId}（封存于 ${rec.created_at}）。` +
+      '该批次不可变；删除原复核不影响此处回看与导出。', 'ok');
+  }).catch(e => setBatchStatus('载入批次失败：' + e.message, 'bad'));
+}
+
+function batchMinutes(payload) {
+  let max = payload.schedule?.end_minute || 0;
+  for (const fr of payload.reviews) {
+    for (const [t] of fr.readings || []) max = Math.max(max, t);
+  }
+  for (const s of payload.samples) max = Math.max(max, s.unboard ?? s.board);
+  return Math.max(30, max + 10);
+}
+
+function renderBatchView(payload) {
+  const box = $('#batchView');
+  box.classList.remove('hidden');
+  box.innerHTML = '';
+  const p = payload.parameters || {};
+
+  // ---- 批次头 ----------------------------------------------------------- //
+  const head = document.createElement('div');
+  head.className = 'batch-head';
+  head.innerHTML = `
+    <span class="big-badge ${payload.overall_conclusion}">${
+      esc(payload.overall_conclusion_label)}</span>
+    <span>批次 <b>#${batchState.currentId}</b> · ${
+      payload.review_count} 条复核（#${payload.review_ids.join('、#')}）</span>
+    <span>样本 ${payload.summary.total}：通过 ${payload.summary.pass} ｜ 复核 ${
+      payload.summary.review} ｜ 数据不足 ${payload.summary.insufficient}</span>
+    <span style="color:#998f7d">允许偏差 ±${num(p.tolerance)}%RH ｜ 剂量上限 ${
+      num(p.dose_limit)} %RH·分钟 ｜ 采样间隔上限 ${p.max_gap} 分钟</span>
+    <span style="color:#998f7d">原排程结束 ${
+      fmtMin(payload.schedule?.end_minute)} ｜ 快照指纹 <code>${
+      esc((payload.schedule_fingerprint || '').slice(0, 12))}…</code></span>
+    ${payload.note ? `<span>备注：${esc(payload.note)}</span>` : ''}`;
+  box.appendChild(head);
+
+  // ---- 冻结记录切换条 --------------------------------------------------- //
+  const sw = document.createElement('div');
+  sw.className = 'batch-switch';
+  for (const fr of payload.reviews) {
+    const b = document.createElement('button');
+    const active = fr.review_id === batchState.activeReviewId;
+    if (active) b.classList.add('active');
+    b.textContent = `#${fr.review_id} ${rvConclusionName[
+      fr.overall_conclusion] || fr.overall_conclusion}` +
+      (fr.note ? ` · ${fr.note}` : '');
+    b.title = `${fr.created_at || ''}：${fr.summary
+      ? `通过 ${fr.summary.pass}/复核 ${fr.summary.review}/数据不足 ${fr.summary.insufficient}`
+      : ''}`;
+    b.onclick = () => {
+      batchState.activeReviewId = fr.review_id;
+      renderBatchView(payload);
+    };
+    sw.appendChild(b);
+  }
+  box.appendChild(sw);
+
+  // ---- 该条记录的计划/实测曲线（复用⑤渲染器，独立轨道） ---------------- //
+  const tl = document.createElement('div');
+  tl.className = 'timeline-wrap';
+  tl.innerHTML = '<div id="btRuler" class="ruler"></div>' +
+    '<div id="btChart" class="rv-chart"></div>' +
+    '<div id="btLanes"></div>';
+  box.appendChild(tl);
+
+  // ---- 对齐矩阵 --------------------------------------------------------- //
+  const table = document.createElement('table');
+  table.className = 'batch-matrix';
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  trh.innerHTML = '<th>样本</th>' +
+    payload.review_ids.map(rid =>
+      `<th>复核 #${rid}</th>`).join('') +
+    '<th class="col-conclusion">批次结论</th><th>最大剂量 (上限)</th>' +
+    '<th>最大偏差</th>';
+  thead.appendChild(trh);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const s of payload.samples) {
+    const perId = Object.fromEntries(s.per_review.map(r => [r.review_id, r]));
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="sample-cell">${esc(s.code)} <span style="color:#998f7d;font-weight:400">#${
+      s.sample_id}</span></td>` +
+      payload.review_ids.map(rid => {
+        const c = perId[rid];
+        return `<td class="cell-${c.conclusion}">${
+          rvConclusionName[c.conclusion] || c.conclusion}<br><span style="color:#998f7d;font-size:11px">剂量 ${
+          num(c.dose)} ｜ 偏差 ${num(c.max_deviation)}%</span></td>`;
+      }).join('') +
+      `<td class="cell-${s.conclusion} col-conclusion"><b>${
+        rvConclusionName[s.conclusion] || s.conclusion}</b></td>` +
+      `<td class="cell-max">${num(s.max_dose)} <span style="color:#998f7d;font-weight:400">/ ${
+        num(s.dose_limit)}</span><br><span style="color:#998f7d;font-size:11px;font-weight:400">来自 #${
+        s.max_dose_review_id}</span></td>` +
+      `<td class="cell-max">${num(s.max_deviation)}%<br><span style="color:#998f7d;font-size:11px;font-weight:400">来自 #${
+        s.max_deviation_review_id}</span></td>`;
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  box.appendChild(table);
+
+  // 曲线需要在 DOM 挂载后渲染
+  const out = batchReviewView(payload, batchState.activeReviewId);
+  renderReview(out, { ruler: '#btRuler', chart: '#btChart',
+                      lanes: '#btLanes', px: 2 });
+}
+
+async function loadBatchRecords() {
+  const box = $('#batchList');
+  box.innerHTML = '';
+  let list = [];
+  try {
+    list = await api('/api/review-batches');
+  } catch { list = []; }
+  batchState.list = list;
+  if (!list.length) {
+    if (!batchState.current) {
+      $('#batchView').classList.add('hidden');
+    }
+    return;
+  }
+  const head = document.createElement('div');
+  head.className = 'panel-head mt';
+  head.innerHTML = '<h3 style="font-size:13.5px">已封存复核批次（不可变）</h3>';
+  box.appendChild(head);
+  for (const r of list) {
+    const div = document.createElement('div');
+    div.className = 'batch-record';
+    const s = r.summary || {};
+    const name = rvConclusionName[r.conclusion] || r.conclusion;
+    div.innerHTML = `<span><span class="dot ${r.conclusion}"></span>批次 #${
+      r.id} · ${esc(r.created_at)} · <b>${name}</b> · ${r.review_count} 条复核（#${
+      (r.review_ids || []).join('、#')}）· 样本 通过 ${s.pass ?? 0}/复核 ${
+      s.review ?? 0}/数据不足 ${s.insufficient ?? 0}${
+      r.note ? ' · ' + esc(r.note) : ''}</span>
+      <span class="ops">
+        <button class="mini" data-act="view">查看 / 导出曲线</button>
+        <button class="mini" data-act="json">导出 JSON</button>
+        <button class="mini del" data-act="del">删除批次</button>
+      </span>`;
+    div.querySelector('[data-act="view"]').onclick = () => viewBatch(r.id);
+    div.querySelector('[data-act="json"]').onclick = () =>
+      downloadBatchJSON(r.id, null);
+    div.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm(`确定删除封存批次 #${r.id}？\n（仅删除批次记录，` +
+          '不影响其中的原复核与原排程）')) return;
+      await api(`/api/review-batches/${r.id}`, { method: 'DELETE' });
+      if (batchState.currentId === r.id) {
+        batchState.current = null;
+        batchState.currentId = null;
+        $('#batchView').classList.add('hidden');
+      }
+      loadBatchRecords();
+      setBatchStatus(`批次 #${r.id} 已删除；原复核记录未受影响。`, 'ok');
+    };
+    box.appendChild(div);
+  }
+}
+
+async function downloadBatchJSON(batchId, payloadArg) {
+  let payload = payloadArg;
+  if (!payload) {
+    try {
+      const rec = await api(`/api/review-batches/${batchId}`);
+      payload = rec.payload;
+    } catch (e) { setBatchStatus('导出失败：' + e.message, 'bad'); return; }
+  }
+  const blob = new Blob([JSON.stringify(
+    { exported_at: new Date().toISOString(), batch_id: batchId, ...payload },
+    null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `humidity-review-batch-${batchId}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+$('#batchReload').onclick = loadBatchRecords;
+$('#batchExport').onclick = () => {
+  if (!batchState.current) {
+    setBatchStatus('请先在下方选择一个已封存批次进行查看。', 'warn');
+    return;
+  }
+  downloadBatchJSON(batchState.currentId, batchState.current);
+};
+
+loadBatchRecords();
 
 // --------------------------------------------------------------------------- //
 // ⑥ 补做排程

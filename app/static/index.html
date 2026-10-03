@@ -137,6 +137,20 @@
           <h3 style="font-size:13.5px">已保存复核记录</h3>
           <button class="btn small" id="rvReload">↻ 刷新</button>
         </div>
+        <div class="batch-bar">
+          <label class="batch-note">封存批次备注
+            <input id="btNote" type="text" placeholder="如：2026-10-01 同批三次平行实测">
+          </label>
+          <span id="btSelInfo" class="batch-sel-info">已选 0 条（需 2～8 条）</span>
+          <button class="btn small primary" id="btSeal" disabled>🔒 封存为复核批次</button>
+          <button class="btn small" id="btClearSel">清空选择</button>
+        </div>
+        <div class="form-hint" style="margin:4px 0 6px">
+          勾选 <b>2～8 条</b>复核记录后封存：系统在一次事务中确认它们引用<b>同一份原排程快照</b>、
+          允许偏差/剂量上限/最大采样间隔一致且<b>样本集合相同</b>，再按样本对齐结论
+          （任一记录「数据不足」→ 数据不足；否则任一「复核」→ 复核；全部「通过」→ 通过）。
+          基线不一致会整批拒绝且不落库。
+        </div>
         <div id="rvRecordList"></div>
       </div>
 
@@ -150,6 +164,34 @@
         <div id="rvSamples"></div>
       </div>
     </div>
+  </section>
+
+  <!-- 复核批次封存 -->
+  <section class="panel wide" id="batchPanel" style="grid-column: 1 / -1;">
+    <div class="panel-head">
+      <h2>⑦ 复核批次封存（同原排程、同基线参数、同样本集合的 2～8 条复核）</h2>
+      <div class="legend">
+        <span><i class="lg plan"></i>计划</span>
+        <span><i class="lg meas"></i>实测</span>
+        <span><i class="lg over"></i>超带</span>
+        <span><i class="lg gap"></i>采样缺口</span>
+      </div>
+    </div>
+    <div class="form-hint" style="margin-bottom:8px">
+      批次一经封存即为<b>不可变</b>记录：每条输入复核的读数/缺口/逐样本明细与共享的原排程快照
+      均完整冻结在批次内，可随时回看、导出；<b>删除原复核记录不影响已封存批次</b>。
+      下方可切换查看批次内各条记录的计划/实测曲线，表格按样本对齐列出每条记录的结论、
+      批次结论与该样本跨记录的<b>最大剂量 / 最大偏差</b>。
+    </div>
+    <div class="runbar">
+      <button class="btn" id="batchReload">↻ 刷新已封存批次</button>
+      <button class="btn" id="batchExport">⬇ 导出当前批次 JSON</button>
+    </div>
+    <div id="batchStatus" class="status">尚无封存批次。在⑤「已保存复核记录」中勾选 2～8 条同基线记录后封存。</div>
+    <div id="batchView" class="batch-view hidden"></div>
+    <div id="batchList"></div>
+  </section>
+
   <!-- 补做排程 -->
   <section class="panel wide" id="redoPanel" style="grid-column: 1 / -1;">
     <div class="panel-head">

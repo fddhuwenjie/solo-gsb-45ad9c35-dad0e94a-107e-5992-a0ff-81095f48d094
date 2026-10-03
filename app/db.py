@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS redo_schedules (
     end_minute  INTEGER NOT NULL,
     payload     TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS review_batches (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    conclusion  TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    review_count INTEGER NOT NULL,
+    payload     TEXT NOT NULL
+);
 """
 
 
@@ -321,3 +329,78 @@ class DB:
     def delete_redo(self, redo_id: int) -> None:
         with self.conn() as c:
             c.execute("DELETE FROM redo_schedules WHERE id=?", (int(redo_id),))
+
+    # ---------------- 复核批次封存 ---------------- #
+    def seal_review_batch(self, review_ids: list[int], note: str = '') -> tuple:
+        """在**一次事务**内：读取所选复核 → 一致性确认（同一份原排程快照、
+        参数一致、样本集合相同）→ 写入不可变批次。
+
+        确认失败时抛 ``app.batch.BatchError``，事务回滚、整批不落库。
+        返回 ``(batch_id, created_at, payload)``。
+        """
+        from .batch import BatchError, seal_batch
+        ids = [int(x) for x in review_ids]
+        with self.conn() as c:
+            placeholders = ','.join('?' * len(ids))
+            rows = c.execute(
+                f"SELECT id,created_at,conclusion,note,payload FROM reviews "
+                f"WHERE id IN ({placeholders})", ids).fetchall()
+            found = {int(r['id']): r for r in rows}
+            missing = [rid for rid in ids if rid not in found]
+            if missing:
+                raise BatchError(
+                    'REVIEW_NOT_FOUND',
+                    f"所选复核记录 {missing} 不存在或已被删除，整批拒绝封存",
+                    {'review_ids': missing})
+            entries = []
+            for rid in ids:  # 保持操作员选择顺序；重复项交由 seal_batch 拒绝
+                r = found[rid]
+                entries.append({'review_id': int(r['id']),
+                                'created_at': r['created_at'],
+                                'note': r['note'],
+                                'payload': json.loads(r['payload'])})
+            result = seal_batch(entries, note)
+            cur = c.execute(
+                "INSERT INTO review_batches(conclusion,note,review_count,payload)"
+                " VALUES (?,?,?,?)",
+                (result['overall_conclusion'], str(note or ''),
+                 int(result['review_count']),
+                 json.dumps(result, ensure_ascii=False)))
+            bid = int(cur.lastrowid)
+        rec = self.get_review_batch(bid)
+        return bid, rec['created_at'], rec['payload']
+
+    def list_review_batches(self, limit: int = 50) -> list[dict]:
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT id,created_at,conclusion,note,review_count,payload"
+                " FROM review_batches ORDER BY id DESC LIMIT ?",
+                (int(limit),)).fetchall()
+            out = []
+            for r in rows:
+                d = json.loads(r['payload'])
+                out.append({
+                    'id': r['id'], 'created_at': r['created_at'],
+                    'conclusion': r['conclusion'], 'note': r['note'],
+                    'review_count': r['review_count'],
+                    'review_ids': d.get('review_ids') or [],
+                    'summary': d.get('summary'),
+                    'parameters': d.get('parameters'),
+                })
+            return out
+
+    def get_review_batch(self, batch_id: int) -> dict | None:
+        with self.conn() as c:
+            r = c.execute(
+                "SELECT id,created_at,conclusion,note,review_count,payload"
+                " FROM review_batches WHERE id=?", (int(batch_id),)).fetchone()
+            if not r:
+                return None
+            return {'id': r['id'], 'created_at': r['created_at'],
+                    'conclusion': r['conclusion'], 'note': r['note'],
+                    'review_count': r['review_count'],
+                    'payload': json.loads(r['payload'])}
+
+    def delete_review_batch(self, batch_id: int) -> None:
+        with self.conn() as c:
+            c.execute("DELETE FROM review_batches WHERE id=?", (int(batch_id),))
