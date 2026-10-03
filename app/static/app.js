@@ -25,6 +25,8 @@ const state = {
   dragging: null,
   review: null,        // 最近一次复核结果
   reviewPx: 2,
+  batchSelected: new Set(),  // ⑦ 批次封存勾选的复核记录 id
+  batch: null,         // 最近一次封存/查看的批次结果
 };
 
 const fmtMin = (m) => {
@@ -1189,6 +1191,12 @@ async function loadReviewRecords() {
   try {
     list = await api('/api/reviews');
   } catch { list = []; }
+  // 清理已不存在记录的勾选状态
+  const alive = new Set(list.map(r => r.id));
+  for (const id of [...state.batchSelected]) {
+    if (!alive.has(id)) state.batchSelected.delete(id);
+  }
+  updateBatchSelInfo();
   if (!list.length) {
     box.innerHTML = '<div style="color:#998f7d;font-size:12px;margin-top:6px">尚无已保存复核记录。</div>';
     return;
@@ -1208,6 +1216,26 @@ async function loadReviewRecords() {
         <button class="mini" data-act="json">JSON</button>
         <button class="mini del" data-act="del">删除</button>
       </span>`;
+    // ⑦ 批次封存勾选框（2~8 条同基线记录）
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'batch-check';
+    cb.checked = state.batchSelected.has(r.id);
+    cb.title = '勾选后可在⑦封存复核批次（2~8 条同基线记录）';
+    cb.onchange = () => {
+      if (cb.checked) {
+        if (state.batchSelected.size >= 8) {
+          cb.checked = false;
+          setBatchStatus('批次最多选择 8 条复核记录。', 'bad');
+          return;
+        }
+        state.batchSelected.add(r.id);
+      } else {
+        state.batchSelected.delete(r.id);
+      }
+      updateBatchSelInfo();
+    };
+    div.querySelector('.ops').prepend(cb);
     div.querySelector('[data-act="view"]').onclick = async () => {
       const rec = await api(`/api/reviews/${r.id}`);
       state.review = rec.payload;
@@ -1219,7 +1247,7 @@ async function loadReviewRecords() {
       downloadReviewJSON(r.payload, `humidity-review-${r.id}.json`);
     };
     div.querySelector('[data-act="del"]').onclick = async () => {
-      if (!confirm(`确定删除复核记录 #${r.id}？`)) return;
+      if (!confirm(`确定删除复核记录 #${r.id}？（已封存的批次不受影响）`)) return;
       await api(`/api/reviews/${r.id}`, { method: 'DELETE' });
       loadReviewRecords();
     };
@@ -1692,6 +1720,192 @@ function exportRedoJSON() {
 $('#redoReload').onclick = loadRedoRecords;
 $('#redoExport').onclick = exportRedoJSON;
 
+// --------------------------------------------------------------------------- //
+// ⑦ 复核批次封存
+// --------------------------------------------------------------------------- //
+function setBatchStatus(msg, kind = '') {
+  const el = $('#batchStatus');
+  el.textContent = msg;
+  el.className = 'status ' + kind;
+}
+
+function updateBatchSelInfo() {
+  const n = state.batchSelected.size;
+  const el = $('#batchSelInfo');
+  el.textContent = n
+    ? `已选 ${n} 条复核记录（封存需 2~8 条同基线记录）`
+    : '未选择复核记录（在⑤的记录列表勾选）';
+  el.classList.toggle('ready', n >= 2 && n <= 8);
+}
+
+async function sealBatch() {
+  const ids = [...state.batchSelected].sort((a, b) => a - b);
+  if (ids.length < 2 || ids.length > 8) {
+    setBatchStatus(`请先在⑤的已保存复核记录中勾选 2~8 条记录（当前 ${ids.length} 条）。`,
+      'bad');
+    return;
+  }
+  setBatchStatus('正在一次事务中校验同基线/同参数/同样本集合并封存…', 'warn');
+  try {
+    const out = await api('/api/review-batches', {
+      method: 'POST',
+      body: { review_ids: ids, note: $('#batchNote').value.trim() },
+    });
+    state.batch = out;
+    renderBatch(out);
+    loadBatchRecords();
+    const sm = out.summary || {};
+    setBatchStatus(`✓ 批次 #${out.batch_id} 已封存（不可变）：整体结论「${
+      out.overall_conclusion_label}」· 通过 ${sm.pass ?? 0}/复核 ${
+      sm.review ?? 0}/数据不足 ${sm.insufficient ?? 0}。` +
+      '此后删除原复核记录不影响本批次。',
+      out.overall_conclusion === 'pass' ? 'ok'
+        : out.overall_conclusion === 'review' ? 'bad' : 'warn');
+  } catch (e) {
+    setBatchStatus('✗ 封存被拒绝（整批未落库）：' + e.message, 'bad');
+  }
+}
+
+function renderBatch(out) {
+  const box = $('#batchResult');
+  box.innerHTML = '';
+  if (!out) return;
+  const head = document.createElement('div');
+  head.className = 'batch-head ' + out.overall_conclusion;
+  const p = out.parameters || {};
+  head.innerHTML = `
+    <span class="badge ${out.overall_conclusion}">${esc(out.overall_conclusion_label)}</span>
+    <span><b>${out.record_count ?? (out.review_ids || []).length}</b> 条记录封存
+      ${out.batch_id ? '· 批次 #' + out.batch_id : ''}${
+      out.created_at ? ' · ' + esc(out.created_at) : ''}${
+      out.note ? ' · ' + esc(out.note) : ''}</span>
+    <span class="batch-meta">允许偏差 ±${num(p.tolerance)} %RH ｜ 剂量上限 ${
+      num(p.dose_limit)} %RH·分钟 ｜ 采样间隔上限 ${p.max_gap} 分钟 ｜ 快照指纹 ${
+      esc(String(out.schedule_fingerprint || '').slice(0, 12))}…</span>`;
+  box.appendChild(head);
+
+  // 输入记录明细
+  const recDiv = document.createElement('div');
+  recDiv.className = 'batch-records';
+  recDiv.innerHTML = '<h4>输入记录（封存后与原记录无关，删除原复核不影响本批次）</h4>';
+  for (const r of out.records || []) {
+    const row = document.createElement('div');
+    row.className = 'batch-rec-row';
+    const s = r.summary || {};
+    row.innerHTML = `<span class="dot ${r.conclusion}"></span>#${r.review_id} · ${
+      esc(r.created_at || '')} · <b>${esc(r.conclusion_label)}</b> · 通过 ${
+      s.pass ?? 0}/复核 ${s.review ?? 0}/数据不足 ${s.insufficient ?? 0}${
+      r.note ? ' · ' + esc(r.note) : ''}`;
+    recDiv.appendChild(row);
+  }
+  box.appendChild(recDiv);
+
+  // 按样本 ID 对齐后的批次结论表
+  const tbl = document.createElement('table');
+  tbl.className = 'batch-table';
+  const recIds = (out.records || []).map(r => r.review_id);
+  tbl.innerHTML = `<thead><tr><th>样本</th><th>批次结论</th>
+    <th>最大剂量<br>%RH·分钟</th><th>最大偏差<br>%RH</th>${
+    recIds.map(id => `<th>#${id}</th>`).join('')}</tr></thead>`;
+  const tbody = document.createElement('tbody');
+  for (const s of out.samples || []) {
+    const tr = document.createElement('tr');
+    tr.className = s.conclusion;
+    const perRec = Object.fromEntries((s.per_record || []).map(
+      x => [x.review_id, x]));
+    const cells = recIds.map(id => {
+      const pr = perRec[id];
+      if (!pr) return '<td>—</td>';
+      return `<td><span class="dot ${pr.conclusion}"></span>${
+        esc(pr.conclusion_label)}<br><small>剂量 ${num(pr.dose)} · 偏差 ${
+        num(pr.max_deviation)}</small></td>`;
+    }).join('');
+    tr.innerHTML = `<td><b>${esc(s.code)}</b><br><small>窗口 ${
+      fmtMin(s.board)}–${s.unboard == null ? '?' : fmtMin(s.unboard)}</small></td>
+      <td><span class="badge ${s.conclusion}">${esc(s.conclusion_label)}</span></td>
+      <td><b>${num(s.max_dose)}</b></td><td><b>${num(s.max_deviation)}</b></td>${
+      cells}`;
+    tbody.appendChild(tr);
+  }
+  tbl.appendChild(tbody);
+  box.appendChild(tbl);
+}
+
+async function loadBatchRecords() {
+  const box = $('#batchRecordList');
+  box.innerHTML = '';
+  let list = [];
+  try {
+    list = await api('/api/review-batches');
+  } catch { list = []; }
+  const head = document.createElement('div');
+  head.className = 'panel-head mt';
+  head.innerHTML = '<h3 style="font-size:13.5px">已封存批次（不可变，可回看/导出）</h3>';
+  box.appendChild(head);
+  if (!list.length) {
+    const d = document.createElement('div');
+    d.style.cssText = 'color:#998f7d;font-size:12px;margin-top:6px';
+    d.textContent = '尚无已封存批次。';
+    box.appendChild(d);
+    return;
+  }
+  for (const b of list) {
+    const div = document.createElement('div');
+    div.className = 'batch-record';
+    const s = b.summary || {};
+    const name = rvConclusionName[b.conclusion] || b.conclusion;
+    div.innerHTML = `<span><span class="dot ${b.conclusion}"></span>批次 #${b.id} · ${
+      esc(b.created_at)} · <b>${name}</b> · 记录 [${(b.review_ids || []).map(
+      x => '#' + x).join(' ')}] · 通过 ${s.pass ?? 0}/复核 ${s.review ?? 0}/数据不足 ${
+      s.insufficient ?? 0}${b.note ? ' · ' + esc(b.note) : ''}</span>
+      <span class="ops">
+        <button class="mini" data-act="view">查看</button>
+        <button class="mini" data-act="json">导出 JSON</button>
+        <button class="mini del" data-act="del">删除</button>
+      </span>`;
+    div.querySelector('[data-act="view"]').onclick = async () => {
+      const rec = await api(`/api/review-batches/${b.id}`);
+      state.batch = { ...rec.payload, batch_id: rec.id,
+                      created_at: rec.created_at };
+      renderBatch(state.batch);
+      setBatchStatus(`已载入批次 #${b.id}（${rec.created_at}，不可变快照）。`, 'ok');
+    };
+    div.querySelector('[data-act="json"]').onclick = () =>
+      downloadBatchJSON({ ...b.payload, batch_id: b.id,
+                          created_at: b.created_at },
+                        `humidity-review-batch-${b.id}.json`);
+    div.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm(`确定删除批次 #${b.id}？（不影响原复核记录与排程）`)) return;
+      await api(`/api/review-batches/${b.id}`, { method: 'DELETE' });
+      loadBatchRecords();
+    };
+    box.appendChild(div);
+  }
+}
+
+function downloadBatchJSON(payload, filename) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)],
+    { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename || `humidity-review-batch-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function exportBatchJSON() {
+  if (!state.batch) {
+    setBatchStatus('请先封存或载入一个批次。', 'bad');
+    return;
+  }
+  downloadBatchJSON({ exported_at: new Date().toISOString(), ...state.batch });
+}
+
+$('#batchSeal').onclick = sealBatch;
+$('#batchReload').onclick = loadBatchRecords;
+$('#batchExport').onclick = exportBatchJSON;
+
 loadAll().catch(e => setStatus('初始化失败：' + e.message, 'bad'));
 loadReviewRecords();
 loadRedoRecords();
+loadBatchRecords();

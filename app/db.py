@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS redo_schedules (
     end_minute  INTEGER NOT NULL,
     payload     TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS review_batches (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    conclusion  TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    review_ids  TEXT NOT NULL,
+    payload     TEXT NOT NULL
+);
 """
 
 
@@ -321,3 +329,79 @@ class DB:
     def delete_redo(self, redo_id: int) -> None:
         with self.conn() as c:
             c.execute("DELETE FROM redo_schedules WHERE id=?", (int(redo_id),))
+
+    # ---------------- 复核批次封存 ---------------- #
+    def seal_review_batch(self, review_ids: list[int],
+                          note: str = '') -> tuple[int, dict]:
+        """在一次事务中封存复核批次：读取所选复核记录 → 校验同一份原排程
+        快照/同一组复核参数/同一样本集合 → 按样本 ID 对齐结论 → 写入
+        不可变批次行。任何校验失败抛 ``batch.BatchError``，连接关闭时
+        未提交的写入随之回滚，整批拒绝且不落库。
+
+        批次不建外键：payload 自包含，删除原复核记录不影响已封存批次。
+        """
+        from . import batch as batch_mod
+        with self.conn() as c:
+            # 显式开启事务：读取记录 → 校验 → 写入批次在同一事务内完成；
+            # 校验抛错时连接直接关闭，未提交的内容随连接回滚，不落库。
+            c.execute("BEGIN IMMEDIATE")
+            records = []
+            for rid in review_ids:
+                r = c.execute(
+                    "SELECT id,created_at,conclusion,note,payload FROM reviews"
+                    " WHERE id=?", (int(rid),)).fetchone()
+                if not r:
+                    raise batch_mod.BatchError(
+                        f"复核记录 #{rid} 不存在，整批拒绝")
+                records.append({'id': r['id'],
+                                'created_at': r['created_at'],
+                                'conclusion': r['conclusion'],
+                                'note': r['note'],
+                                'payload': json.loads(r['payload'])})
+            payload = batch_mod.seal_batch(records, note=note)
+            cur = c.execute(
+                "INSERT INTO review_batches(conclusion,note,review_ids,payload)"
+                " VALUES (?,?,?,?)",
+                (payload['overall_conclusion'], str(note or ''),
+                 json.dumps(payload['review_ids'], ensure_ascii=False),
+                 json.dumps(payload, ensure_ascii=False)))
+            return int(cur.lastrowid), payload
+
+    def list_batches(self, limit: int = 50) -> list[dict]:
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT id,created_at,conclusion,note,review_ids,payload"
+                " FROM review_batches ORDER BY id DESC LIMIT ?",
+                (int(limit),)).fetchall()
+            out = []
+            for r in rows:
+                d = json.loads(r['payload'])
+                out.append({'id': r['id'], 'created_at': r['created_at'],
+                            'conclusion': r['conclusion'], 'note': r['note'],
+                            'review_ids': json.loads(r['review_ids']),
+                            'summary': d.get('summary'),
+                            'parameters': d.get('parameters'),
+                            'schedule_fingerprint':
+                                d.get('schedule_fingerprint'),
+                            'payload': d})
+            return out
+
+    def get_batch(self, bid: int) -> dict | None:
+        with self.conn() as c:
+            r = c.execute(
+                "SELECT id,created_at,conclusion,note,review_ids,payload"
+                " FROM review_batches WHERE id=?", (int(bid),)).fetchone()
+            if not r:
+                return None
+            d = json.loads(r['payload'])
+            return {'id': r['id'], 'created_at': r['created_at'],
+                    'conclusion': r['conclusion'], 'note': r['note'],
+                    'review_ids': json.loads(r['review_ids']),
+                    'summary': d.get('summary'),
+                    'parameters': d.get('parameters'),
+                    'payload': d}
+
+    def delete_batch(self, bid: int) -> None:
+        """删除批次本身；不影响任何原复核记录与排程快照。"""
+        with self.conn() as c:
+            c.execute("DELETE FROM review_batches WHERE id=?", (int(bid),))

@@ -40,6 +40,16 @@
 不保存半成品。页面以灰色泳道展示冻结历史、彩色泳道展示补做时间轴并标出
 衔接处，可回看已保存补做方案并导出 JSON。
 
+⑦ **复核批次封存**：在⑤的「已保存复核记录」中勾选 **2~8 条**复核记录，
+系统在**一次事务**中确认它们引用**同一份原排程快照**（规范化 JSON 的
+SHA-256 指纹一致）、**允许偏差 / 剂量上限 / 最大采样间隔**一致且
+**样本集合相同**，再按样本 ID 对齐结论：任一记录该样本为「数据不足」
+则批次该样本为「数据不足」，否则任一为「复核」则为「复核」，全部「通过」
+才为「通过」；每个样本保留跨记录的**最大剂量**与**最大偏差**，并保留每条
+输入记录的逐样本明细。记录缺失快照、重复选择或基线/参数不一致时
+**整批拒绝且不落库**。封存成功的批次**不可变**：可回看、可导出 JSON，
+**删除原复核记录不影响批次**（批次不建外键、内容自包含）。
+
 ---
 
 ## 一条命令启动
@@ -63,9 +73,10 @@ docker compose up --build
 | --- | --- |
 | 前端 | 原生 HTML / CSS / JavaScript（无框架、无构建步骤），SVG 画湿度曲线、Pointer Events 拖拽 |
 | 后端 | Flask（REST API）+ waitress 生产级 WSGI |
-| 存储 | SQLite（样本、阶梯、互斥关系、占用、容量/独立换档上限设置、排程快照、复核记录、补做方案） |
+| 存储 | SQLite（样本、阶梯、互斥关系、占用、容量/独立换档上限设置、排程快照、复核记录、补做方案、复核批次） |
 | 编排引擎 | `app/scheduler.py`，纯标准库分钟级确定性仿真 + 排列/启发式搜索（含冻结历史前缀的补做排程），可独立单测 |
 | 复核引擎 | `app/review.py`，纯标准库分段线性曲线解析积分（允许带面积 / 采样缺口），可独立单测 |
+| 批次封存 | `app/batch.py`，纯标准库同基线校验 + 按样本 ID 对齐结论，可独立单测 |
 
 ### 本地不使用 Docker 运行
 
@@ -132,6 +143,9 @@ python3 -m unittest discover -s app/tests -v
 | POST | `/api/reviews/{id}/redo` | 对该复核生成**补做排程**，见下 |
 | GET | `/api/redo` | 已保存补做方案列表（可带 `?review_id=` 过滤） |
 | GET/DELETE | `/api/redo/{id}` | 查看 / 删除单条补做方案 |
+| POST | `/api/review-batches` | 复核批次封存，body: `{review_ids:[…2~8 条], note?}`，见下 |
+| GET | `/api/review-batches` | 已封存批次列表（可带 `?limit=`） |
+| GET/DELETE | `/api/review-batches/{id}` | 查看（不可变完整快照）/ 删除单个批次 |
 | GET | `/` | 编排台页面 |
 
 ### 样本 JSON 示例
@@ -284,20 +298,65 @@ http://localhost:8000 均保持不变。
 
 ---
 
+## 复核批次封存
+
+`POST /api/review-batches`，body：
+
+```json
+{ "review_ids": [3, 4, 5], "note": "九月第一周三次实测汇总" }
+```
+
+系统在**一次事务**中完成全部校验与落库（任一校验失败即整批拒绝、
+数据库不留任何痕迹）：
+
+1. 数量必须为 **2~8** 条，且不得重复选择同一记录；
+2. 每条记录都必须嵌入**原排程快照**（极旧记录缺失快照 → 整批拒绝）；
+3. 所有记录的快照指纹（规范化 JSON 的 SHA-256）必须相同——
+   即引用**同一份原排程**；
+4. **允许偏差、累计偏差剂量上限、最大采样间隔**必须逐条一致；
+5. **样本集合**（sample_id 集合）必须相同。
+
+校验通过后按样本 ID 对齐各记录结论：
+
+| 各记录对同一样本的结论 | 批次该样本结论 |
+| --- | --- |
+| 任一「数据不足」 | 数据不足 |
+| 无「数据不足」，任一「复核」 | 复核 |
+| 全部「通过」 | 通过 |
+
+批次整体结论对所有样本的对齐结论再按同一规则汇总。
+
+### 批次 JSON 包含
+
+`batch_id`、`created_at`、`note`、`review_ids[]`、`record_count`、
+`parameters`（允许偏差/剂量上限/最大采样间隔）、`schedule_fingerprint`、
+`records[]`（每条输入记录的结论与汇总）、`samples[]`（每样本：对齐结论、
+`max_dose`、`max_deviation`、`per_record[]` 逐记录结论/剂量/最大偏差）、
+`summary`、`overall_conclusion`。
+
+批次**不可变**且自包含（不与原复核建外键）：可经
+`GET /api/review-batches/{id}` 回看、页面内查看并导出 JSON；
+**删除原复核记录不影响批次**，删除批次也不影响任何原复核记录。
+
+---
+
 ## 目录
 
 ```
 app/
   scheduler.py     # 编排引擎（无框架依赖，可独立单测）
   review.py        # 实测湿度复核引擎（分段线性曲线解析积分，可独立单测）
-  db.py            # SQLite 持久化（含复核记录）
+  batch.py         # 复核批次封存引擎（同基线校验 + 结论对齐，可独立单测）
+  db.py            # SQLite 持久化（含复核记录、补做方案、复核批次）
   server.py        # Flask 路由 + waitress
   static/
     index.html     # 单页界面
     style.css
-    app.js         # 时间轴/SVG/拖拽/复核/导出
+    app.js         # 时间轴/SVG/拖拽/复核/补做/批次封存/导出
   tests/test_scheduler.py
   tests/test_review.py
+  tests/test_redo.py
+  tests/test_batch.py
 Dockerfile
 docker-compose.yml
 requirements.txt

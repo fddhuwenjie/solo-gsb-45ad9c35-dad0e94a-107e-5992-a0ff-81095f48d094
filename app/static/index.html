@@ -134,7 +134,7 @@
         </div>
 
         <div class="panel-head mt">
-          <h3 style="font-size:13.5px">已保存复核记录</h3>
+          <h3 style="font-size:13.5px">已保存复核记录（勾选 2~8 条可在⑦封存批次）</h3>
           <button class="btn small" id="rvReload">↻ 刷新</button>
         </div>
         <div id="rvRecordList"></div>
@@ -183,6 +183,39 @@
       <div id="redoCapTrack" class="cap-track"></div>
     </div>
     <div id="redoRecordList"></div>
+  </section>
+
+  <!-- 复核批次封存 -->
+  <section class="panel wide" id="batchPanel" style="grid-column: 1 / -1;">
+    <div class="panel-head">
+      <h2>⑦ 复核批次封存（2~8 条同基线复核记录 → 不可变批次）</h2>
+      <div class="legend">
+        <span><i class="dot pass"></i>通过</span>
+        <span><i class="dot review"></i>复核</span>
+        <span><i class="dot insufficient"></i>数据不足</span>
+      </div>
+    </div>
+    <div class="form-hint" style="margin-bottom:8px">
+      在⑤的「已保存复核记录」中勾选 <b>2~8 条</b>记录后在此封存。系统会在
+      <b>一次事务</b>中确认它们引用<b>同一份原排程快照</b>、允许偏差 / 剂量上限 /
+      最大采样间隔一致且<b>样本集合相同</b>，再按样本 ID 对齐结论：任一记录为
+      <b>「数据不足」</b>则该样本为「数据不足」，否则任一为<b>「复核」</b>则为「复核」，
+      全部「通过」才为「通过」；每个样本保留跨记录的<b>最大剂量</b>与<b>最大偏差</b>。
+      记录缺失快照、重复选择或基线/参数不一致时<b>整批拒绝、不落库</b>。
+      封存成功的批次<b>不可变</b>：可回看、可导出，删除原复核记录不影响批次。
+    </div>
+    <div class="runbar" style="align-items:center">
+      <span id="batchSelInfo" class="batch-sel-info">未选择复核记录</span>
+      <label style="font-size:12px;color:#7a7468;flex:1;min-width:180px">批次备注
+        <input id="batchNote" type="text" placeholder="如：九月第一周三次实测汇总">
+      </label>
+      <button class="btn primary" id="batchSeal">⚗ 封存复核批次</button>
+      <button class="btn" id="batchReload">↻ 刷新批次列表</button>
+      <button class="btn" id="batchExport">⬇ 导出批次 JSON</button>
+    </div>
+    <div id="batchStatus" class="status">尚未封存批次。请先在⑤勾选 2~8 条已保存复核记录。</div>
+    <div id="batchResult"></div>
+    <div id="batchRecordList"></div>
   </section>
 </main>
 
